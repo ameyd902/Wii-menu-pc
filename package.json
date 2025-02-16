@@ -1,0 +1,12 @@
+{
+  "title": "Wii Menu Theme",
+  "author": "Your Name",
+  "version": "1.0",
+  "description": "Nintendo Wii-style theme for RetroArch",
+  "layout": "xmb",
+  "assets": {
+    "font": "fonts/wii-font.ttf",
+    "background": "backgrounds/wii-bg.png",
+    "icons": "icons/wii-system"
+  }
+}
