@@ -1,134 +1,221 @@
-#!/usr/bin/env python3
-import sys, threading
-from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QGridLayout,
-    QPushButton, QLabel, QInputDialog, QAction
-)
-from PyQt5.QtCore import Qt, QTimer, QPoint
-from PyQt5.QtGui import QPixmap
-from evdev import InputDevice, categorize, ecodes, list_devices
+import pygame
+import os
+import json
+import subprocess
+import sys
+import time
 
-class WiiMenu(QMainWindow):
+# Configuration
+CONFIG_FILE = os.path.expanduser("~/.wiilauncher_config.json")
+SCREEN_SIZE = (1280, 720)
+ICON_SIZE = 150
+PADDING = 30
+THEME_COLOR = (0, 70, 140)
+HIGHLIGHT_COLOR = (255, 255, 0)
+
+class GameIcon:
+    def __init__(self, title, path, emulator, position):
+        self.title = title
+        self.path = path
+        self.emulator = emulator
+        self.position = position
+        self.target_position = position
+        self.image = pygame.Surface((ICON_SIZE, ICON_SIZE))
+        self.image.fill((200, 200, 200))  # Placeholder
+        self.rect = self.image.get_rect(topleft=position)
+        self.scale = 1.0
+
+    def update(self, dt):
+        self.rect.x += (self.target_position[0] - self.rect.x) * dt * 10
+        self.rect.y += (self.target_position[1] - self.rect.y) * dt * 10
+        self.scale += (1.0 - self.scale) * dt * 10
+
+    def draw(self, surface):
+        scaled_image = pygame.transform.scale(self.image, 
+            (int(ICON_SIZE * self.scale), int(ICON_SIZE * self.scale)))
+        surface.blit(scaled_image, scaled_image.get_rect(center=self.rect.center))
+
+class Folder:
+    def __init__(self, name, position):
+        self.name = name
+        self.position = position
+        self.target_position = position
+        self.icons = []
+        self.image = pygame.Surface((ICON_SIZE, ICON_SIZE))
+        self.image.fill((150, 150, 150))  # Folder color
+        self.rect = self.image.get_rect(topleft=position)
+        self.scale = 1.0
+
+    def update(self, dt):
+        # Similar animation to GameIcon
+        pass
+
+    def draw(self, surface):
+        # Similar drawing to GameIcon
+        pass
+
+class WiiLauncher:
     def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Custom Wii Menu")
-        self.showFullScreen()
-        # Set a background color similar to the Wii menu’s blue
-        self.setStyleSheet("background-color: #1A237E;")
-        
-        # Central widget and grid layout for game icons
-        self.central_widget = QWidget(self)
-        self.setCentralWidget(self.central_widget)
-        self.grid_layout = QGridLayout(self.central_widget)
-        self.grid_layout.setSpacing(40)
-        
-        self.game_buttons = []
-        # Create a 3x4 grid of sample game icons (circular buttons)
-        for i in range(3):
-            for j in range(4):
-                btn = QPushButton(f"Game {i*4+j+1}")
-                btn.setFixedSize(150, 150)
-                # Circular appearance with a white background
-                btn.setStyleSheet("background-color: white; border-radius: 75px;")
-                self.grid_layout.addWidget(btn, i, j)
-                self.game_buttons.append(btn)
-        
-        # Pointer: a QLabel with an image (provide your own 'pointer.png')
-        self.pointer = QLabel(self)
+        pygame.init()
+        self.screen = pygame.display.set_mode(SCREEN_SIZE)
+        self.clock = pygame.time.Clock()
+        self.running = True
+        self.icons = []
+        self.folders = []
+        self.selected_index = 0
+        self.current_folder = None
+        self.config = self.load_config()
+        self.joystick = self.init_wiimote()
+        self.mouse_control = True
+
+        # Load initial content
+        self.scan_games()
+        self.arrange_icons()
+
+    def init_wiimote(self):
+        if pygame.joystick.get_count() > 0:
+            joystick = pygame.joystick.Joystick(0)
+            joystick.init()
+            return joystick
+        return None
+
+    def load_config(self):
+        default_config = {
+            "platforms": [
+                {
+                    "name": "GameCube",
+                    "path": os.path.expanduser("~/Games/GameCube"),
+                    "extensions": [".iso", ".gcm"],
+                    "emulator": "dolphin-emu"
+                }
+            ],
+            "folders": [],
+            "settings": {
+                "grid_cols": 6,
+                "grid_rows": 2,
+                "theme_color": THEME_COLOR
+            }
+        }
         try:
-            self.pointer.setPixmap(QPixmap("pointer.png").scaled(32, 32, Qt.KeepAspectRatio))
-        except Exception:
-            self.pointer.setText("•")
-            self.pointer.setStyleSheet("color: red; font-size: 32px;")
-        self.pointer.setFixedSize(32, 32)
-        # Start pointer at center of the screen
-        self.pointer_pos = QPoint(self.width()//2, self.height()//2)
-        self.pointer.move(self.pointer_pos)
-        self.pointer.show()
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+            except FileNotFoundError:
+            return default_config
+
+    def save_config(self):
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump(self.config, f, indent=4)
+
+    def scan_games(self):
+        for platform in self.config['platforms']:
+            if os.path.exists(platform['path']):
+                for file in os.listdir(platform['path']):
+                    if file.endswith(tuple(platform['extensions'])):
+                        self.icons.append(GameIcon(
+                            os.path.splitext(file)[0],
+                            os.path.join(platform['path'], file),
+                            platform['emulator'],
+                            (0, 0)  # Position will be set in arrange_icons
+                        ))
+
+    def arrange_icons(self):
+        cols = self.config['settings']['grid_cols']
+        for i, icon in enumerate(self.icons + self.folders):
+            row = i // cols
+            col = i % cols
+            x = PADDING + col * (ICON_SIZE + PADDING)
+            y = PADDING + row * (ICON_SIZE + PADDING + 50)
+            icon.target_position = (x, y)
+
+    def handle_input(self):
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                self.handle_mouse_click()
+            elif event.type == pygame.JOYBUTTONDOWN:
+                self.handle_joystick_buttons(event.button)
+            elif event.type == pygame.JOYAXISMOTION:
+                self.handle_joystick_axis(event.axis, event.value)
+
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_ESCAPE]:
+            self.running = False
+
+    def handle_joystick_buttons(self, button):
+        # Wii Remote button mapping
+        if button == 0:  # A Button
+            self.activate_selected()
+        elif button == 1:  # B Button
+            self.navigate_back()
+        elif button == 4:  # + Button
+            self.show_settings_menu()
+
+    def handle_joystick_axis(self, axis, value):
+        # Handle pointing with IR sensor
+        pass
+
+    def activate_selected(self):
+        selected = self.icons[self.selected_index]
+        if isinstance(selected, Folder):
+            self.current_folder = selected
+            self.arrange_icons()
+        else:
+            self.launch_game(selected)
+
+    def launch_game(self, icon):
+        try:
+            subprocess.Popen([icon.emulator, icon.path])
+            self.running = False
+        except Exception as e:
+            print(f"Error launching game: {e}")
+
+    def show_settings_menu(self):
+        # Implement settings UI
+        pass
+
+    def navigate_back(self):
+        if self.current_folder:
+            self.current_folder = None
+            self.arrange_icons()
+
+    def update(self, dt):
+        for icon in self.icons + self.folders:
+            icon.update(dt)
+
+    def draw(self):
+        self.screen.fill(self.config['settings']['theme_color'])
         
-        # Timer to update pointer widget position
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_pointer)
-        self.timer.start(30)  # update every 30 ms
-        
-        # Add a menu action for folder creation
-        menubar = self.menuBar()
-        folder_menu = menubar.addMenu("Folders")
-        create_folder_action = QAction("Create Folder", self)
-        create_folder_action.triggered.connect(self.create_folder)
-        folder_menu.addAction(create_folder_action)
-    
-    def update_pointer(self):
-        self.pointer.move(self.pointer_pos)
-    
-    def move_pointer(self, dx, dy):
-        # Update pointer position with bounds checking
-        new_x = max(0, min(self.width() - self.pointer.width(), self.pointer_pos.x() + dx))
-        new_y = max(0, min(self.height() - self.pointer.height(), self.pointer_pos.y() + dy))
-        self.pointer_pos = QPoint(new_x, new_y)
-    
-    def create_folder(self):
-        # Pop up a dialog to name the folder; then add a new button
-        text, ok = QInputDialog.getText(self, "Create Folder", "Folder Name:")
-        if ok and text:
-            btn = QPushButton(text)
-            btn.setFixedSize(150, 150)
-            btn.setStyleSheet("background-color: lightgray; border-radius: 75px;")
-            # Add new folder to the next available position
-            row = len(self.game_buttons) // 4
-            col = len(self.game_buttons) % 4
-            self.grid_layout.addWidget(btn, row, col)
-            self.game_buttons.append(btn)
+        # Draw exit button
+        pygame.draw.circle(self.screen, (200, 0, 0), (40, 40), 20)
+        exit_font = pygame.font.Font(None, 30)
+        exit_text = exit_font.render("X", True, (255, 255, 255))
+        self.screen.blit(exit_text, (30, 30))
 
-def wiimote_listener(app_window):
-    """
-    Listens for Wiimote events using evdev.
-    This example assumes the Wiimote is registered as an input device.
-    Adjust the axis normalization as needed.
-    """
-    devices = [InputDevice(path) for path in list_devices()]
-    wiimote = None
-    # Try to locate a device with 'Wiimote' or 'Nintendo' in its name
-    for dev in devices:
-        if "Wiimote" in dev.name or "Nintendo" in dev.name:
-            wiimote = dev
-            break
-    if not wiimote:
-        print("No Wiimote found. Make sure it is paired and recognized by Linux.")
-        return
+        # Draw all items
+        for icon in self.icons + self.folders:
+            icon.draw(self.screen)
 
-    print("Wiimote connected on", wiimote.path)
-    for event in wiimote.read_loop():
-        if event.type == ecodes.EV_ABS:
-            # Use ABS_RX and ABS_RY as an example for pointer motion.
-            if event.code == ecodes.ABS_RX:
-                # Simple normalization: adjust sensitivity as needed.
-                dx = int((event.value - 128) / 10)
-                app_window.move_pointer(dx, 0)
-            elif event.code == ecodes.ABS_RY:
-                dy = int((event.value - 128) / 10)
-                app_window.move_pointer(0, dy)
-        elif event.type == ecodes.EV_KEY and event.value == 1:
-            # On button press, check if the pointer is over a button and trigger its click.
-            pos = app_window.pointer_pos + app_window.pointer.rect().center()
-            widget = app_window.childAt(pos)
-            if widget and isinstance(widget, QPushButton):
-                print("Activating:", widget.text())
-                # You could add additional visual feedback here before triggering.
-                widget.click()
+        # Draw selection highlight
+        selected = self.icons[self.selected_index]
+        pygame.draw.rect(self.screen, HIGHLIGHT_COLOR, selected.rect, 3)
 
-def main():
-    app = QApplication(sys.argv)
-    window = WiiMenu()
-    window.show()
-    
-    # Start the Wiimote listener in a separate thread so the GUI remains responsive.
-    t = threading.Thread(target=wiimote_listener, args=(window,), daemon=True)
-    t.start()
-    
-    sys.exit(app.exec_())
+        pygame.display.flip()
+
+    def run(self):
+        last_time = time.time()
+        while self.running:
+            dt = time.time() - last_time
+            last_time = time.time()
+            
+            self.handle_input()
+            self.update(dt)
+            self.draw()
+            self.clock.tick(60)
+
+        pygame.quit()
+        sys.exit()
 
 if __name__ == "__main__":
-    main()
-
-
+    launcher = WiiLauncher()
+    launcher.run()
